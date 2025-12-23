@@ -1,14 +1,669 @@
-
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Document</title>
+    <title>3D太空场景渲染系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { overflow: hidden; background: #000; font-family: Arial, sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        #ui { position: absolute; top: 20px; left: 20px; color: white; z-index: 100; background: rgba(0,0,0,0.7); padding: 15px; border-radius: 8px; }
+        button { padding: 8px 16px; margin: 5px 0; background: #4169E1; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #1E90FF; }
+        .info { margin-bottom: 10px; line-height: 1.5; }
+        #fps { margin-top: 10px; }
+    </style>
 </head>
 <body>
-    <h1>Home</h1>
-    <a href="../Phongshading.html">Hw2</a>
-    <a href="../hw3.html">Hw3</a>
+    <div id="ui">
+        <div class="info">
+            <p>视角控制：鼠标拖拽旋转 | 滚轮缩放</p>
+            <p>视角移动：W(前) S(后) A(左) D(右) Y(上) U(下)</p>
+        </div>
+        <button id="toggleStyle">切换风格：真实 ↔ 童真</button>
+        <p id="fps">帧率：60 FPS</p>
+    </div>
+    <div id="canvas-container"></div>
+
+    <!-- Three.js核心库 -->
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/postprocessing/EffectComposer.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/postprocessing/RenderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/postprocessing/ShaderPass.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/shaders/FXAAShader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/shaders/CopyShader.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/examples/js/postprocessing/UnrealBloomPass.js"></script>
+
+    <script>
+        // ===================== 全局变量 =====================
+        let scene, camera, renderer, controls, composer;
+        let sun, earth, spaceship, starField;
+        let styleMode = 'realistic'; // 风格模式：realistic(真实)/cartoon(童真)
+        let keys = {};
+        let clock = new THREE.Clock();
+        let lastTime = performance.now();
+        let frameCount = 0;
+
+        // ===================== 初始化核心组件 =====================
+        // 初始化渲染器（反走样+性能优化）
+        function initRenderer() {
+            renderer = new THREE.WebGLRenderer({
+                antialias: true, // MSAA反走样
+                powerPreference: "high-performance", // 高性能模式
+                precision: "highp" // 高精度渲染
+            });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 限制像素比优化帧率
+            renderer.toneMapping = THREE.ACESFilmicToneMapping; // 全局光照色调映射
+            renderer.toneMappingExposure = 1.0;
+            renderer.outputColorSpace = THREE.SRGBColorSpace; // 色彩空间校正
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+        }
+
+        // 初始化场景（全局光照+太空环境）
+        function initScene() {
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x000010); // 深空背景
+            scene.fog = new THREE.FogExp2(0x000010, 0.001); // 深度雾化
+
+            // 复杂光源系统（全局光照核心）
+            // 1. 太阳点光源（主光源，带辉光）
+            const sunLight = new THREE.PointLight(0xffff88, 3.0, 500, 2.0);
+            sunLight.position.set(0, 0, 0);
+            scene.add(sunLight);
+
+            // 2. 环境光（宇宙漫反射）
+            const ambientLight = new THREE.AmbientLight(0x222244, 0.2);
+            scene.add(ambientLight);
+
+            // 3. 飞船补光
+            const shipLight = new THREE.SpotLight(0xff4400, 1.0, 50);
+            shipLight.target = new THREE.Object3D();
+            scene.add(shipLight);
+            scene.add(shipLight.target);
+        }
+
+        // 初始化相机（支持多维度移动）
+        function initCamera() {
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 2000);
+            camera.position.set(50, 30, 80); // 初始视角：朝向太阳-地球方向
+            camera.lookAt(0, 0, 0);
+
+            // 鼠标控制
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true; // 阻尼平滑移动
+            controls.dampingFactor = 0.05;
+            controls.screenSpacePanning = false;
+            controls.minDistance = 10;
+            controls.maxDistance = 500;
+
+            // 键盘事件监听（WSADYU控制）
+            document.addEventListener('keydown', (e) => { keys[e.code] = true; });
+            document.addEventListener('keyup', (e) => { keys[e.code] = false; });
+        }
+
+        // 初始化后处理（FXAA反走样+辉光效果）
+        function initPostProcessing() {
+            composer = new THREE.EffectComposer(renderer);
+            composer.addPass(new THREE.RenderPass(scene, camera));
+
+            // FXAA反走样通道（消除锯齿）
+            const fxaaPass = new THREE.ShaderPass(THREE.FXAAShader);
+            fxaaPass.material.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+            composer.addPass(fxaaPass);
+
+            // 辉光效果（太阳/飞船喷气）
+            const bloomPass = new THREE.UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.5, 0.4, 0.85);
+            composer.addPass(bloomPass);
+
+            // 最终拷贝通道
+            const copyPass = new THREE.ShaderPass(THREE.CopyShader);
+            copyPass.renderToScreen = true;
+            composer.addPass(copyPass);
+        }
+
+        // ===================== 太空元素创建（着色器核心） =====================
+        // 创建太阳（复杂着色器+动画）
+        function createSun() {
+            sun = new THREE.Group();
+            scene.add(sun);
+
+            // 太阳几何体（细分球体，复杂几何造型）
+            const sunGeometry = new THREE.SphereGeometry(15, 64, 64);
+
+            // 太阳自定义着色器（并行计算实现火焰纹理+等离子动画）
+            const sunVertexShader = `
+                uniform float time;
+                varying vec2 vUv;
+                varying vec3 vNormal;
+                void main() {
+                    vUv = uv;
+                    vNormal = normalize(normalMatrix * normal);
+                    // 等离子波动动画
+                    vec3 pos = position + normal * sin(time * 2.0 + position.y * 5.0) * 0.5;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                }
+            `;
+
+            const sunFragmentShader = `
+                uniform float time;
+                uniform int styleMode; // 0=真实 1=童真
+                varying vec2 vUv;
+                varying vec3 vNormal;
+                
+                // 噪声函数（生成火焰纹理）
+                float noise(vec2 p) {
+                    return fract(sin(dot(p, vec2(12.9898, 78.233))) * 43758.5453);
+                }
+                
+                void main() {
+                    vec3 baseColor;
+                    if (styleMode == 0) {
+                        // 真实风格：橙黄渐变+火焰纹理
+                        baseColor = mix(vec3(1.0, 0.6, 0.0), vec3(1.0, 0.2, 0.0), vUv.y);
+                    } else {
+                        // 童真风格：亮黄卡通色
+                        baseColor = mix(vec3(1.0, 1.0, 0.2), vec3(1.0, 0.8, 0.1), vUv.y);
+                    }
+                    
+                    // 火焰动画
+                    float n = noise(vUv * 10.0 + time * 3.0);
+                    baseColor *= 1.0 + n * 0.5;
+                    
+                    // 法线高光（全局光照）
+                    vec3 lightDir = normalize(vNormal);
+                    float glow = pow(max(dot(lightDir, vec3(0.0, 0.0, 1.0)), 0.0), 2.0);
+                    baseColor += glow * vec3(1.0, 0.5, 0.0);
+                    
+                    gl_FragColor = vec4(baseColor, 1.0);
+                }
+            `;
+
+            const sunMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    styleMode: { value: 0 } // 初始真实风格
+                },
+                vertexShader: sunVertexShader,
+                fragmentShader: sunFragmentShader,
+                emissive: 0xffff00,
+                emissiveIntensity: 1.5
+            });
+
+            const sunMesh = new THREE.Mesh(sunGeometry, sunMaterial);
+            sun.add(sunMesh);
+
+            // 太阳日冕（辉光效果）
+            const coronaGeometry = new THREE.SphereGeometry(18, 64, 64);
+            const coronaMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    styleMode: { value: 0 }
+                },
+                vertexShader: sunVertexShader,
+                fragmentShader: `
+                    uniform float time;
+                    uniform int styleMode;
+                    varying vec2 vUv;
+                    void main() {
+                        float alpha = 0.0;
+                        if (styleMode == 0) {
+                            alpha = (1.0 - vUv.y) * 0.3 * sin(time * 5.0 + vUv.x * 10.0);
+                        } else {
+                            alpha = (1.0 - vUv.y) * 0.5;
+                        }
+                        gl_FragColor = vec4(1.0, 0.8, 0.2, alpha);
+                    }
+                `,
+                transparent: true,
+                side: THREE.BackSide
+            });
+            const coronaMesh = new THREE.Mesh(coronaGeometry, coronaMaterial);
+            sun.add(coronaMesh);
+
+            // 太阳动画更新函数
+            window.updateSun = (time) => {
+                sunMesh.material.uniforms.time.value = time;
+                coronaMesh.material.uniforms.time.value = time;
+                sunMesh.material.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                coronaMesh.material.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                // 太阳自转
+                sun.rotation.y += 0.001;
+            };
+        }
+
+        // 创建地球（公转+自转+大气层）
+        function createEarth() {
+            earth = new THREE.Group();
+            scene.add(earth);
+            earth.position.set(80, 0, 0); // 初始公转位置
+
+            // 地球几何体
+            const earthGeometry = new THREE.SphereGeometry(8, 64, 64);
+
+            // 地球自定义着色器（地形+海洋+大气层）
+            const earthVertexShader = `
+                uniform float time;
+                varying vec2 vUv;
+                varying vec3 vNormal;
+                void main() {
+                    vUv = uv;
+                    vNormal = normalize(normalMatrix * normal);
+                    // 轻微地形起伏
+                    vec3 pos = position + normal * sin(time + position.x * 10.0) * 0.1;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                }
+            `;
+
+            const earthFragmentShader = `
+                uniform float time;
+                uniform int styleMode;
+                varying vec2 vUv;
+                varying vec3 vNormal;
+                
+                // 伪随机函数生成地形
+                float random(vec2 p) {
+                    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+                }
+                
+                void main() {
+                    vec3 landColor, seaColor;
+                    
+                    if (styleMode == 0) {
+                        // 真实风格
+                        landColor = vec3(0.2, 0.6, 0.2);
+                        seaColor = vec3(0.1, 0.3, 0.8);
+                    } else {
+                        // 童真风格
+                        landColor = vec3(0.3, 0.8, 0.3);
+                        seaColor = vec3(0.2, 0.4, 1.0);
+                    }
+                    
+                    // 生成大陆纹理
+                    float land = step(0.5, random(vUv * 10.0));
+                    vec3 color = mix(seaColor, landColor, land);
+                    
+                    // 光照（全局光照模型）
+                    vec3 sunDir = normalize(vec3(-80.0, 0.0, 0.0) - vWorldPosition);
+                    float diff = max(dot(vNormal, sunDir), 0.0);
+                    color = mix(color * 0.5, color * 1.5, diff);
+                    
+                    gl_FragColor = vec4(color, 1.0);
+                }
+            `;
+
+            const earthMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    styleMode: { value: 0 },
+                    vWorldPosition: { value: new THREE.Vector3() }
+                },
+                vertexShader: earthVertexShader,
+                fragmentShader: earthFragmentShader
+            });
+
+            const earthMesh = new THREE.Mesh(earthGeometry, earthMaterial);
+            earth.add(earthMesh);
+
+            // 地球大气层
+            const atmosphereGeometry = new THREE.SphereGeometry(8.5, 64, 64);
+            const atmosphereMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    styleMode: { value: 0 }
+                },
+                vertexShader: `
+                    varying vec3 vNormal;
+                    void main() {
+                        vNormal = normalize(normalMatrix * normal);
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform int styleMode;
+                    varying vec3 vNormal;
+                    void main() {
+                        float alpha = 0.0;
+                        if (styleMode == 0) {
+                            alpha = pow(max(dot(vNormal, vec3(0.0, 0.0, 1.0)), 0.0), 2.0) * 0.2;
+                        } else {
+                            alpha = pow(max(dot(vNormal, vec3(0.0, 0.0, 1.0)), 0.0), 1.0) * 0.3;
+                        }
+                        gl_FragColor = vec4(0.3, 0.6, 1.0, alpha);
+                    }
+                `,
+                transparent: true,
+                side: THREE.BackSide
+            });
+            const atmosphereMesh = new THREE.Mesh(atmosphereGeometry, atmosphereMaterial);
+            earth.add(atmosphereMesh);
+
+            // 地球动画更新
+            window.updateEarth = (time) => {
+                earthMesh.material.uniforms.time.value = time;
+                earthMesh.material.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                atmosphereMaterial.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                
+                // 公转（绕太阳）
+                earth.position.x = Math.cos(time * 0.1) * 80;
+                earth.position.z = Math.sin(time * 0.1) * 80;
+                
+                // 自转
+                earth.rotation.y += 0.01;
+            };
+        }
+
+        // 创建宇宙飞船（复杂几何+喷气动画+可交互）
+        function createSpaceship() {
+            spaceship = new THREE.Group();
+            scene.add(spaceship);
+            spaceship.position.set(30, 20, -40); // 初始位置
+
+            // 飞船主体（复杂几何造型：多面体组合）
+            const shipGroup = new THREE.Group();
+            
+            // 主船体
+            const bodyGeometry = new THREE.ConeGeometry(3, 8, 32);
+            const bodyMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    styleMode: { value: 0 }
+                },
+                vertexShader: `
+                    varying vec3 vNormal;
+                    void main() {
+                        vNormal = normalize(normalMatrix * normal);
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform int styleMode;
+                    varying vec3 vNormal;
+                    void main() {
+                        vec3 color;
+                        if (styleMode == 0) {
+                            color = vec3(0.8, 0.8, 0.9);
+                        } else {
+                            color = vec3(0.2, 0.8, 1.0);
+                        }
+                        // 高光
+                        float spec = pow(max(dot(vNormal, vec3(1.0, 1.0, 1.0)), 0.0), 32.0);
+                        color += spec * vec3(1.0);
+                        gl_FragColor = vec4(color, 1.0);
+                    }
+                `
+            });
+            const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            bodyMesh.rotation.x = Math.PI / 2;
+            shipGroup.add(bodyMesh);
+
+            // 飞船机翼
+            const wingGeometry = new THREE.BoxGeometry(6, 1, 2);
+            const wingMaterial = bodyMaterial.clone();
+            const leftWing = new THREE.Mesh(wingGeometry, wingMaterial);
+            leftWing.position.set(-4, 0, 0);
+            shipGroup.add(leftWing);
+            const rightWing = new THREE.Mesh(wingGeometry, wingMaterial);
+            rightWing.position.set(4, 0, 0);
+            shipGroup.add(rightWing);
+
+            // 喷气火焰（着色器动画）
+            const jetGeometry = new THREE.ConeGeometry(2, 8, 16);
+            const jetMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    styleMode: { value: 0 }
+                },
+                vertexShader: `
+                    uniform float time;
+                    varying vec2 vUv;
+                    void main() {
+                        vUv = uv;
+                        // 火焰波动
+                        vec3 pos = position + vec3(
+                            sin(time * 10.0 + position.y * 5.0) * 0.5,
+                            0.0,
+                            cos(time * 10.0 + position.y * 5.0) * 0.5
+                        );
+                        gl_Position = projectionMatrix * modelViewMatrix * vec4(pos, 1.0);
+                    }
+                `,
+                fragmentShader: `
+                    uniform float time;
+                    uniform int styleMode;
+                    varying vec2 vUv;
+                    void main() {
+                        vec3 color;
+                        float alpha = 1.0 - vUv.y;
+                        
+                        if (styleMode == 0) {
+                            color = mix(vec3(1.0, 0.5, 0.0), vec3(1.0, 0.0, 0.0), vUv.y);
+                            alpha *= sin(time * 20.0 + vUv.x * 10.0) * 0.5 + 0.5;
+                        } else {
+                            color = mix(vec3(1.0, 1.0, 0.0), vec3(1.0, 0.5, 0.0), vUv.y);
+                            alpha *= 0.8;
+                        }
+                        
+                        gl_FragColor = vec4(color, alpha);
+                    }
+                `,
+                transparent: true,
+                blending: THREE.AdditiveBlending // 加法混合增强辉光
+            });
+            const jetMesh = new THREE.Mesh(jetGeometry, jetMaterial);
+            jetMesh.rotation.x = Math.PI / 2;
+            jetMesh.position.z = -4;
+            shipGroup.add(jetMesh);
+
+            spaceship.add(shipGroup);
+
+            // 飞船动画更新
+            window.updateSpaceship = (time) => {
+                bodyMaterial.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                jetMaterial.uniforms.time.value = time;
+                jetMaterial.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                
+                // 飞船轻微晃动
+                spaceship.rotation.x = Math.sin(time * 1.0) * 0.05;
+                spaceship.rotation.z = Math.cos(time * 1.0) * 0.05;
+            };
+        }
+
+        // 创建星空背景（粒子系统+着色器）
+        function createStarField() {
+            starField = new THREE.Group();
+            scene.add(starField);
+
+            // 星空粒子（GPU并行计算）
+            const starCount = 10000;
+            const starGeometry = new THREE.BufferGeometry();
+            const starPositions = new Float32Array(starCount * 3);
+            const starSizes = new Float32Array(starCount);
+            const starColors = new Float32Array(starCount * 3);
+
+            // 随机生成星星
+            for (let i = 0; i < starCount; i++) {
+                const i3 = i * 3;
+                // 位置（球形分布）
+                starPositions[i3] = (Math.random() - 0.5) * 2000;
+                starPositions[i3 + 1] = (Math.random() - 0.5) * 2000;
+                starPositions[i3 + 2] = (Math.random() - 0.5) * 2000;
+                
+                // 大小
+                starSizes[i] = Math.random() * 2 + 0.1;
+                
+                // 颜色
+                if (styleMode === 'realistic') {
+                    starColors[i3] = 1.0;
+                    starColors[i3 + 1] = 1.0;
+                    starColors[i3 + 2] = 1.0;
+                } else {
+                    starColors[i3] = Math.random();
+                    starColors[i3 + 1] = Math.random();
+                    starColors[i3 + 2] = 1.0;
+                }
+            }
+
+            starGeometry.setAttribute('position', new THREE.BufferAttribute(starPositions, 3));
+            starGeometry.setAttribute('size', new THREE.BufferAttribute(starSizes, 1));
+            starGeometry.setAttribute('color', new THREE.BufferAttribute(starColors, 3));
+
+            // 星空着色器
+            const starMaterial = new THREE.ShaderMaterial({
+                uniforms: {
+                    time: { value: 0.0 },
+                    styleMode: { value: 0 }
+                },
+                vertexShader: `
+                    attribute float size;
+                    attribute vec3 color;
+                    uniform float time;
+                    varying vec3 vColor;
+                    varying float vAlpha;
+                    void main() {
+                        vColor = color;
+                        // 星星闪烁
+                        vAlpha = sin(time * 5.0 + position.x * 0.1) * 0.5 + 0.5;
+                        vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
+                        gl_PointSize = size * (100.0 / -mvPosition.z);
+                        gl_Position = projectionMatrix * mvPosition;
+                    }
+                `,
+                fragmentShader: `
+                    uniform int styleMode;
+                    varying vec3 vColor;
+                    varying float vAlpha;
+                    void main() {
+                        // 圆形星星
+                        float distanceToCenter = length(gl_PointCoord - vec2(0.5));
+                        float alpha = 1.0 - smoothstep(0.4, 0.5, distanceToCenter);
+                        alpha *= vAlpha;
+                        
+                        if (styleMode == 1) {
+                            // 童真风格：方形星星
+                            alpha = distanceToCenter < 0.4 ? 1.0 : 0.0;
+                        }
+                        
+                        gl_FragColor = vec4(vColor, alpha);
+                    }
+                `,
+                transparent: true,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            });
+
+            const starPoints = new THREE.Points(starGeometry, starMaterial);
+            starField.add(starPoints);
+
+            // 星空动画更新
+            window.updateStarField = (time) => {
+                starMaterial.uniforms.time.value = time;
+                starMaterial.uniforms.styleMode.value = styleMode === 'realistic' ? 0 : 1;
+                // 星空缓慢旋转
+                starField.rotation.y += 0.0001;
+            };
+        }
+
+        // ===================== 交互控制 & 性能优化 =====================
+        // 视角移动控制（WSADYU）
+        function updateCameraMovement() {
+            const speed = 10.0;
+            const delta = clock.getDelta();
+            
+            // 相机方向向量
+            const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            const right = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+            const up = new THREE.Vector3(0, 1, 0).applyQuaternion(camera.quaternion);
+            
+            // 归一化（消除缩放影响）
+            forward.normalize();
+            right.normalize();
+            up.normalize();
+
+            // WSAD前后左右
+            if (keys['KeyW']) camera.position.add(forward.multiplyScalar(speed * delta));
+            if (keys['KeyS']) camera.position.sub(forward.multiplyScalar(speed * delta));
+            if (keys['KeyA']) camera.position.sub(right.multiplyScalar(speed * delta));
+            if (keys['KeyD']) camera.position.add(right.multiplyScalar(speed * delta));
+            
+            // YU上下
+            if (keys['KeyY']) camera.position.add(up.multiplyScalar(speed * delta));
+            if (keys['KeyU']) camera.position.sub(up.multiplyScalar(speed * delta));
+        }
+
+        // 帧率计算 & 性能监控
+        function updateFPS() {
+            const currentTime = performance.now();
+            frameCount++;
+            if (currentTime - lastTime >= 1000) {
+                const fps = Math.round((frameCount * 1000) / (currentTime - lastTime));
+                document.getElementById('fps').textContent = `帧率：${fps} FPS`;
+                lastTime = currentTime;
+                frameCount = 0;
+                
+                // 自动帧率优化：如果帧率过低，降低渲染精度
+                if (fps < 30) {
+                    renderer.setPixelRatio(1);
+                } else if (fps > 50) {
+                    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+                }
+            }
+        }
+
+        // 风格切换控制
+        function initStyleToggle() {
+            document.getElementById('toggleStyle').addEventListener('click', () => {
+                styleMode = styleMode === 'realistic' ? 'cartoon' : 'realistic';
+                const btn = document.getElementById('toggleStyle');
+                btn.textContent = styleMode === 'realistic' ? '切换风格：真实 ↔ 童真' : '切换风格：童真 ↔ 真实';
+            });
+        }
+
+        // ===================== 动画循环 =====================
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = clock.getElapsedTime();
+
+            // 更新所有元素
+            controls.update(); // 鼠标控制更新
+            updateCameraMovement(); // 键盘视角移动
+            updateSun(time); // 太阳动画
+            updateEarth(time); // 地球动画
+            updateSpaceship(time); // 飞船动画
+            updateStarField(time); // 星空动画
+            updateFPS(); // 帧率更新
+
+            // 渲染场景（后处理+反走样）
+            composer.render();
+        }
+
+        // 窗口自适应
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            composer.setSize(window.innerWidth, window.innerHeight);
+            
+            // 更新FXAA分辨率
+            composer.passes[1].material.uniforms['resolution'].value.set(1 / window.innerWidth, 1 / window.innerHeight);
+        });
+
+        // ===================== 初始化执行 =====================
+        function init() {
+            initRenderer();
+            initScene();
+            initCamera();
+            initPostProcessing();
+            createSun();
+            createEarth();
+            createSpaceship();
+            createStarField();
+            initStyleToggle();
+            animate();
+        }
+
+        // 启动程序
+        init();
+    </script>
 </body>
 </html>
